@@ -1,0 +1,15 @@
+node_modules
+.next
+.env
+.env.local
+.env*.local
+.git
+.gitignore
+.DS_Store
+*.swp
+*.swo
+.idea
+.vscode
+.github
+renovate.json
+*.md
