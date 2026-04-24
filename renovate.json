@@ -1,0 +1,48 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "schedule": ["before 6am on Monday"],
+  "timezone": "Europe/London",
+  "labels": ["dependencies"],
+  "packageRules": [
+    {
+      "description": "Auto-merge non-breaking dependency updates",
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "matchPackagePatterns": ["*"],
+      "excludePackageNames": ["next", "react", "react-dom", "next-auth"],
+      "automerge": true,
+      "automergeType": "pr"
+    },
+    {
+      "description": "Group all Radix UI updates into one PR",
+      "matchPackagePatterns": ["^@radix-ui/"],
+      "groupName": "Radix UI",
+      "automerge": true
+    },
+    {
+      "description": "Group Next.js + React core upgrades — review manually",
+      "matchPackageNames": ["next", "react", "react-dom", "@types/react", "@types/react-dom"],
+      "groupName": "Next.js / React",
+      "automerge": false
+    },
+    {
+      "description": "Require manual review for next-auth (auth changes need testing)",
+      "matchPackageNames": ["next-auth"],
+      "automerge": false
+    },
+    {
+      "description": "Group Docker base image digest updates",
+      "matchDatasources": ["docker"],
+      "groupName": "Docker base images",
+      "automerge": true
+    },
+    {
+      "description": "Group GitHub Actions updates",
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions",
+      "automerge": true
+    }
+  ]
+}
