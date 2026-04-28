@@ -237,6 +237,77 @@ export interface RepoConfig {
 }
 
 
+// Test failure details (annotation-based, used by the inline panel)
+/**
+ * A single failed test case fetched from check run annotations.
+ * Annotations are created by test reporter actions (dorny/test-reporter,
+ * mikepenz/action-junit-report, etc.) when a test suite has failures.
+ */
+export interface TestFailure {
+  checkRunName: string   // e.g. "Reference Tests / gloas - mainnet - operations/withdrawals"
+  testName: string       // e.g. "random_partial_withdrawals_1"
+  message: string        // error message or assertion failure summary
+  stackTrace: string | null  // full stack trace, if the reporter included it
+}
+
+/** Response from GET /api/test-failures (annotation-based) */
+export interface TestFailuresApiResponse {
+  failures: TestFailure[]
+}
+
+
+// JUnit XML artifact-based test results (used by the dedicated failures page)
+
+export interface TestFailureInfo {
+  message: string
+  detail: string  // full stack trace
+  type: string
+}
+
+export interface TestCase {
+  classname: string
+  name: string
+  time: number
+  status: 'passed' | 'failed' | 'error' | 'skipped'
+  failure: TestFailureInfo | null
+}
+
+export interface TestSuite {
+  name: string
+  time: number
+  total: number
+  passed: number
+  skipped: number
+  /** Only failure/error/skipped entries kept — passing tests are dropped to reduce payload */
+  testcases: TestCase[]
+  fromCheckRun?: boolean
+}
+
+export interface TestArtifact {
+  artifactName: string
+  suites: TestSuite[]
+  error?: string
+}
+
+export interface PRTestResults {
+  artifacts: TestArtifact[]
+  checkRunSuites: TestSuite[]  // fallback when artifacts have expired
+  expiredArtifacts: number
+  hasArtifacts: boolean
+  testCounts: {
+    total: number
+    failed: number
+    passed: number
+    skipped: number
+  }
+}
+
+/** Response from GET /api/pr-failures (artifact/JUnit XML based) */
+export interface PRFailuresApiResponse {
+  results: PRTestResults
+}
+
+
 // API response envelopes
 /**
  * Response from GET /api/prs

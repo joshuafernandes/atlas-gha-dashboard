@@ -1,4 +1,4 @@
-// 
+//
 // Pull Request list component.
 //
 // Fetches PR data from /api/prs and renders one card per repo, with each
@@ -18,12 +18,12 @@
 // BUILD STATUS (BuildStatus component):
 //   Renders a human-readable status line below the PR title:
 //     - "Passed #234 ↗"                      (green, links to run)
-//     - "Failed #234 ↗: job-a, job-b"        (red, lists failed jobs)
+//     - "Failed #234 ↗: job-a, job-b → View failures"  (red, links to failures page)
 //     - "Running #234 ↗: job-a"              (yellow, spinning icon)
 //     - "Cancelled #234 ↗"                   (orange)
 //   Plus an optional test counts line when dorny/test-reporter (or similar)
-//   is configured: "1 234 tests: 1 220 passed · 14 skipped"
-// 
+//   is configured: "1 234 tests: 1 220 passed · 14 failed"
+//
 
 'use client'
 
@@ -37,12 +37,41 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Card } from '@/components/ui/card'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
-import { RefreshCw, GitPullRequest, CheckCircle2, XCircle, Loader2, ExternalLink } from 'lucide-react'
+import {
+  RefreshCw,
+  GitPullRequest,
+  CheckCircle2,
+  XCircle,
+  Loader2,
+  ExternalLink,
+  ChevronRight,
+} from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import type { PrsApiResponse, PullRequest } from '@/types'
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
+
+// Build the URL for the dedicated failures page, carrying all the context the
+// page needs so it doesn't have to fetch the PR metadata a second time.
+function failuresUrl(pr: PullRequest): string {
+  if (!pr.latestRun) return '#'
+  const [owner, repo] = pr.repo.split('/')
+  const p = new URLSearchParams({
+    owner:     owner!,
+    repo:      repo!,
+    runId:     String(pr.latestRun.id),
+    sha:       pr.head_sha,
+    prNumber:  String(pr.number),
+    prTitle:   pr.title,
+    prUrl:     pr.html_url,
+    runUrl:    pr.latestRun.html_url,
+    runNumber: String(pr.latestRun.run_number),
+    branch:    pr.head_sha,   // head_sha used as fallback; real branch not in PullRequest type
+    author:    pr.author.login,
+  })
+  return `/test-failures?${p.toString()}`
+}
 
 // Build status row
 
@@ -79,7 +108,7 @@ function BuildStatus({ pr }: { pr: PullRequest }) {
           </span>
         )}
 
-        {/* Failed — list the specific job names so you know what to look at */}
+        {/* Failed — list the specific job names + link to failures page */}
         {workflowStatus === 'failing' && (
           <span className="inline-flex items-center gap-1 text-red-500 font-medium">
             <XCircle className="h-3.5 w-3.5" />
@@ -135,6 +164,18 @@ function BuildStatus({ pr }: { pr: PullRequest }) {
           </span>
         )}
       </div>
+
+      {/* View failures link on its own line, directly below the Failed status */}
+      {workflowStatus === 'failing' && (
+        <div>
+          <Link
+            href={failuresUrl(pr)}
+            className="inline-flex items-center gap-0.5 text-xs text-red-400 hover:text-red-300 underline underline-offset-2 decoration-dotted transition-colors"
+          >
+            View failures <ChevronRight className="h-3 w-3" />
+          </Link>
+        </div>
+      )}
     </div>
   )
 }
@@ -186,7 +227,7 @@ function PrRow({ pr }: { pr: PullRequest }) {
           </span>
         </div>
 
-        {/* Build status line (pass/fail/running + test counts) */}
+        {/* Build status line (pass/fail/running + test counts + failures link) */}
         <BuildStatus pr={pr} />
       </div>
 
@@ -224,7 +265,7 @@ function PrSkeletons() {
   )
 }
 
-// Main component─
+// Main component
 
 export function PrList() {
   const { selectedRepo, selectedAuthor } = useRepoFilter()

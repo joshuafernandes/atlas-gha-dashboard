@@ -29,6 +29,7 @@ import type {
   WorkflowRun,
   WorkflowStatus,
   TestCounts,
+  TestFailure,
   CodeScanAlert,
   AlertSeverity,
   AlertState,
@@ -243,10 +244,9 @@ async function fetchWorkflowJobs(
 // titles using regexes. This is best-effort — if it doesn't match, we return
 // null and the PR row simply doesn't show test counts.
 //
-// For accurate counts from JUnit XML files, see the teku-ci project which
-// downloads artifact ZIPs and parses XML directly (not yet implemented here).
 
 interface GhCheckRun {
+  id: number
   name: string
   conclusion: string | null
   output: { title: string | null } | null
@@ -309,6 +309,298 @@ async function fetchTestCounts(
     return { total, passed, failed, skipped }
   } catch {
     return null
+  }
+}
+
+// Test failure details from check run annotations
+//
+// Test reporter actions (dorny/test-reporter, mikepenz/action-junit-report, etc.)
+// write one annotation per failed test case onto the check run. Each annotation
+// has annotation_level="failure", a title (test name), a message (error summary),
+// and raw_details (stack trace). We fetch these for all failed check runs and
+// return them structured so the UI can render expandable failure cards.
+
+interface GhAnnotation {
+  path: string
+  annotation_level: string   // 'notice' | 'warning' | 'failure'
+  title: string | null       // test name set by the reporter action
+  message: string            // error message / assertion failure text
+  raw_details: string | null // full stack trace, when provided
+}
+
+/**
+ * Fetch individual test failure details for a PR's head commit.
+ *
+ * Finds all check runs with conclusion=failure, then fetches their annotations
+ * (up to 100 per check run). Only annotation_level="failure" entries are kept.
+ *
+ * Returns [] if the repo's CI doesn't use annotation-based test reporters.
+ */
+export async function fetchTestFailures(
+  owner: string,
+  repo: string,
+  sha: string,
+  token: string,
+): Promise<TestFailure[]> {
+  const data = await ghJson<{ check_runs: GhCheckRun[] }>(
+    `/repos/${owner}/${repo}/commits/${sha}/check-runs?per_page=100`,
+    token,
+  )
+
+  const failedRuns = (data.check_runs ?? []).filter((cr) => cr.conclusion === 'failure')
+  if (!failedRuns.length) return []
+
+  const results = await Promise.allSettled(
+    failedRuns.map(async (cr): Promise<TestFailure[]> => {
+      const annotations = await ghJson<GhAnnotation[]>(
+        `/repos/${owner}/${repo}/check-runs/${cr.id}/annotations?per_page=100`,
+        token,
+      )
+      return (annotations ?? [])
+        .filter((a) => a.annotation_level === 'failure')
+        .map((a) => ({
+          checkRunName: cr.name,
+          testName: a.title ?? a.path,
+          message: a.message,
+          stackTrace: a.raw_details ?? null,
+        }))
+    }),
+  )
+
+  return results
+    .filter((r): r is PromiseFulfilledResult<TestFailure[]> => r.status === 'fulfilled')
+    .flatMap((r) => r.value)
+}
+
+
+// JUnit XML artifact-based test results
+//
+//   1. List artifacts for the run; filter to those that look like test reports.
+//   2. Download each artifact ZIP and parse all .xml files inside as JUnit XML.
+//   3. Deduplicate suites across artifacts (parallel CI jobs can contain the
+//      same test suite in multiple ZIPs).
+//   4. Fall back to check-run HTML summaries when all artifacts have expired.
+//
+
+import AdmZip from 'adm-zip'
+import { parseXml, compactSuites, parseReportHtml } from './junit'
+import type { TestArtifact, TestSuite, PRTestResults } from '@/types'
+
+// Test artifact names in Teku follow the pattern:
+//   {unit|integration|acceptance|property|reference}-reports-{jobname}
+// We match both that exact format and common generic patterns used by other repos.
+const TEST_ARTIFACT_RE = /^(unit|integration|acceptance|property|reference)-reports-|test[-_]report|junit[-_]results/i
+const TEST_REPORT_CHECK_RUN_RE = /^(unit|integration|acceptance|property|reference)TestsReport$/i
+
+interface GhArtifact {
+  id: number
+  name: string
+  expired: boolean
+}
+
+async function downloadAndParseArtifact(
+  owner: string,
+  repo: string,
+  artifactId: number,
+  artifactName: string,
+  token: string,
+): Promise<TestArtifact> {
+  // GitHub returns a 302 redirect to a short-lived signed URL.
+  // Node.js fetch follows the redirect automatically; the auth header is
+  // stripped on the cross-origin hop to the storage server (correct behaviour).
+  const res = await ghFetch(
+    `/repos/${owner}/${repo}/actions/artifacts/${artifactId}/zip`,
+    token,
+  )
+  if (!res.ok) {
+    return { artifactName, suites: [], error: `HTTP ${res.status}` }
+  }
+
+  const zip = new AdmZip(Buffer.from(await res.arrayBuffer()))
+  const rawSuites: ReturnType<typeof parseXml>[0][] = []
+
+  for (const entry of zip.getEntries()) {
+    if (!entry.entryName.endsWith('.xml')) continue
+    try {
+      rawSuites.push(...parseXml(entry.getData().toString('utf8')))
+    } catch (e) {
+      console.error(`Parse error ${entry.entryName}: ${(e as Error).message}`)
+    }
+  }
+
+  // Within a single ZIP, prefer the suite with the most test cases when the
+  // same suite name appears in both a per-class file and an aggregate file.
+  const bySuiteName = new Map<string, (typeof rawSuites)[0]>()
+  for (const s of rawSuites) {
+    const existing = bySuiteName.get(s.name)
+    if (!existing || s.testcases.length > existing.testcases.length) {
+      bySuiteName.set(s.name, s)
+    }
+  }
+
+  return { artifactName, suites: compactSuites([...bySuiteName.values()]) }
+}
+
+// When suites with the same name appear in multiple artifact ZIPs (parallel CI
+// shards uploading their own copy of the full report), keep only the first one.
+function deduplicateSuites(artifactResults: TestArtifact[]): void {
+  const seen = new Set<string>()
+  for (const art of artifactResults) {
+    art.suites = art.suites.filter((s) => {
+      if (seen.has(s.name)) return false
+      seen.add(s.name)
+      return true
+    })
+  }
+}
+
+// Fetch check-run summaries as a fallback when all test artifacts have expired.
+async function fetchCheckRunSuites(
+  owner: string,
+  repo: string,
+  sha: string,
+  token: string,
+): Promise<TestSuite[]> {
+  const data = await ghGraphQL<{
+    repository: {
+      object: {
+        checkSuites: {
+          nodes: Array<{
+            checkRuns: {
+              nodes: Array<{ name: string; conclusion: string | null; summary: string | null }>
+            }
+          }>
+        }
+      } | null
+    } | null
+  }>(
+    `{
+      repository(owner: "${owner}", name: "${repo}") {
+        object(expression: "${sha}") {
+          ... on Commit {
+            checkSuites(first: 20) {
+              nodes {
+                checkRuns(first: 100) {
+                  nodes { name conclusion summary }
+                }
+              }
+            }
+          }
+        }
+      }
+    }`,
+    token,
+  )
+
+  if (!data?.repository?.object) return []
+  const seen = new Set<string>()
+  return (data.repository.object.checkSuites?.nodes ?? [])
+    .flatMap((s) => s.checkRuns?.nodes ?? [])
+    .filter((cr) => {
+      if (!TEST_REPORT_CHECK_RUN_RE.test(cr.name) || seen.has(cr.name)) return false
+      seen.add(cr.name)
+      return true
+    })
+    .map((cr) => parseReportHtml(cr.name, cr.summary))
+    .filter((s): s is TestSuite => s !== null)
+}
+
+function computeTestCounts(
+  artifacts: TestArtifact[],
+  checkRunSuites: TestSuite[],
+): PRTestResults['testCounts'] {
+  let total = 0, failed = 0, passed = 0, skipped = 0
+  for (const art of artifacts) {
+    for (const s of art.suites) {
+      failed  += s.testcases.filter((t) => t.status === 'failed' || t.status === 'error').length
+      total   += s.total   ?? 0
+      passed  += s.passed  ?? 0
+      skipped += s.skipped ?? 0
+    }
+  }
+  for (const s of checkRunSuites) {
+    failed  += s.testcases.filter((t) => t.status === 'failed' || t.status === 'error').length
+    total   += s.total   ?? 0
+    passed  += s.passed  ?? 0
+    skipped += s.skipped ?? 0
+  }
+  return { total, failed, passed, skipped }
+}
+
+/**
+ * Fetch and parse JUnit XML test results for a completed workflow run.
+ *
+ * Downloads artifact ZIPs whose names match the test-report pattern, unzips
+ * them in memory, and parses all JUnit XML files inside. Falls back to
+ * check-run HTML summaries when artifacts have expired.
+ *
+ * stateless per-request model (no in-memory state between calls).
+ */
+export async function fetchPRTestResults(
+  owner: string,
+  repo: string,
+  runId: number,
+  sha: string,
+  token: string,
+): Promise<PRTestResults> {
+  const [artifactsData] = await Promise.all([
+    ghJson<{ artifacts: GhArtifact[] }>(
+      `/repos/${owner}/${repo}/actions/runs/${runId}/artifacts?per_page=100`,
+      token,
+    ),
+  ])
+
+  const allTestArtifacts = (artifactsData.artifacts ?? []).filter((a) =>
+    TEST_ARTIFACT_RE.test(a.name),
+  )
+
+  // When a run is re-triggered, stale artifacts from the previous attempt share
+  // the same name. Keep only the highest-id artifact per name (most recent upload).
+  const byName = new Map<string, GhArtifact>()
+  for (const a of allTestArtifacts) {
+    const existing = byName.get(a.name)
+    if (!existing || a.id > existing.id) byName.set(a.name, a)
+  }
+  const testArtifacts = [...byName.values()]
+  const expiredCount  = testArtifacts.filter((a) => a.expired).length
+  const downloadable  = testArtifacts.filter((a) => !a.expired)
+
+  // All artifacts expired → fall back to check-run summaries
+  if (expiredCount > 0 && downloadable.length === 0) {
+    const checkRunSuites = await fetchCheckRunSuites(owner, repo, sha, token)
+    return {
+      artifacts: [],
+      checkRunSuites,
+      expiredArtifacts: expiredCount,
+      hasArtifacts: false,
+      testCounts: computeTestCounts([], checkRunSuites),
+    }
+  }
+
+  // No test artifacts at all (build failure before tests ran, or different CI setup)
+  if (testArtifacts.length === 0) {
+    const checkRunSuites = await fetchCheckRunSuites(owner, repo, sha, token)
+    return {
+      artifacts: [],
+      checkRunSuites,
+      expiredArtifacts: 0,
+      hasArtifacts: false,
+      testCounts: computeTestCounts([], checkRunSuites),
+    }
+  }
+
+  // Download and parse all available artifacts concurrently
+  const artifactResults = await Promise.all(
+    downloadable.map((a) => downloadAndParseArtifact(owner, repo, a.id, a.name, token)),
+  )
+  deduplicateSuites(artifactResults)
+
+  return {
+    artifacts: artifactResults,
+    checkRunSuites: [],
+    expiredArtifacts: expiredCount,
+    hasArtifacts: true,
+    testCounts: computeTestCounts(artifactResults, []),
   }
 }
 
