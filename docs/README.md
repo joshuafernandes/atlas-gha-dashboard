@@ -15,6 +15,14 @@ eg `app/prs` etc.
 dashboard layout (src/app/(dashboard)/layout.tsx) across those routes.
 - 
 
+## Screenshots joshuafernandes/atlas-gha-dashboard/tree/master/docs
+
+Dashboard - PRs
+![alt gha-dashboard-prs](https://github.com/joshuafernandes/atlas-gha-dashboard/blob/master/docs/img/gha-dashboard-prs.jpg?raw=true)
+
+Dashboard - workflows
+![alt gha-dashboard-workflows](https://github.com/joshuafernandes/atlas-gha-dashboard/blob/master/docs/img/gha-dashboard-workflows.jpg?raw=true)
+
 
 ## Folder layout
 ```
@@ -98,14 +106,16 @@ Go to **GitHub → Settings → Developer settings → GitHub Apps → New GitHu
 
 Set these permissions:
 
+You only need repository permissions for this app, not global or account
+
 | Permission | Level | Required for |
 |---|---|---|
-| **Metadata** | Read | Mandatory baseline |
-| **Pull requests** | Read | PR list + review decisions |
 | **Actions** | Read | Workflow runs, jobs, workflow list |
 | **Checks** | Read | Test counts from check runs |
 | **Code scanning alerts** | Read | Code scanning page (optional — omit if not needed) |
 | **Dependabot alerts** | Read | Dependabot vulnerability alerts page (optional) |
+| **Metadata** | Read | Mandatory baseline |
+| **Pull requests** | Read | PR list + review decisions |
 | **Secret scanning alerts** | Read | Secret scanning alerts page (optional — requires GitHub Advanced Security) |
 
 After creating the app, generate a private key from the app's settings page — this downloads a `.pem` file.
