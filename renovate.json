@@ -10,7 +10,6 @@
     {
       "description": "Auto-merge non-breaking dependency updates",
       "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
-      "matchPackagePatterns": ["*"],
       "excludePackageNames": ["next", "react", "react-dom", "next-auth"],
       "automerge": true,
       "automergeType": "pr"
